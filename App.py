@@ -1,282 +1,169 @@
+import base64
 import json
-from datetime import datetime
-import numpy as np
-import pandas as pd
+import io
 import streamlit as st
-import yfinance as yf
+from PIL import Image, ImageDraw, ImageFont
 from openai import OpenAI
 
-# ------------------------------------------------------------------
-# CONFIGURAZIONE E STILE GRAFICO (QUANTUM GLASSMORPHISM)
-# ------------------------------------------------------------------
-st.set_page_config(
-    page_title="QUANTUM AI - XM.COM TERMINAL",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+# 1. Inizializzazione del client API (assicurati di inserire la tua API Key nei Secrets di Streamlit o come variabile d'ambiente)
+client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", "IL_TUO_API_KEY_HERE"))
 
-# Custom CSS per rispecchiare fedelmente il design originale
-st.markdown(
-    """
-<style>
-    /* Sfondo Generale */
-    .stApp {
-        background-color: #060814;
-        color: #e2e8f0;
-    }
+st.set_page_config(page_title="Trading Chart AI Analyzer", layout="wide")
+st.title("📈 AI Chart Analyzer & Annotator")
+st.write("Carica lo screenshot del tuo grafico per ricevere l'analisi visiva, i livelli di trading e le annotazioni sulle zone chiave.")
+
+# 2. Funzione per convertire l'immagine in Base64 per l'API Vision
+def encode_image(image_bytes):
+    return base64.b64encode(image_bytes).decode('utf-8')
+
+# 3. Funzione per disegnare le annotazioni sul grafico
+def annotate_chart(original_image, annotations):
+    img = original_image.convert("RGBA")
+    draw = ImageDraw.Draw(img)
+    width, height = img.size
+
+    # Disegno delle Bounding Box/Zone (es. Order Blocks, FVG, Liquidity)
+    for box in annotations.get("boxes", []):
+        # Convertiamo le coordinate percentuali (0-100) in pixel reali
+        ymin, xmin, ymax, xmax = box["box_2d"]
+        left = (xmin / 100.0) * width
+        top = (ymin / 100.0) * height
+        right = (xmax / 100.0) * width
+        bottom = (ymax / 100.0) * height
+        
+        label = box.get("label", "")
+        color = box.get("color", "yellow") # e.g. green per demand, red per supply
+
+        # Disegno del rettangolo della zona
+        draw.rectangle([left, top, right, bottom], outline=color, width=3)
+        # Etichetta di testo
+        draw.text((left + 5, top + 5), label, fill=color)
+
+    # Disegno dei livelli di prezzo (Entry, SL, TP)
+    for line in annotations.get("price_lines", []):
+        y_percent = line["y_position_percent"]
+        y_pixel = (y_percent / 100.0) * height
+        label = line.get("label", "")
+        color = line.get("color", "white")
+
+        # Linea orizzontale
+        draw.line([(0, y_pixel), (width, y_pixel)], fill=color, width=2)
+        # Testo accanto alla linea
+        draw.text((10, y_pixel - 15), label, fill=color)
+
+    return img.convert("RGB")
+
+# 4. Uploader Immagine
+uploaded_file = st.file_uploader("Carica lo screenshot del grafico (PNG, JPG)", type=["png", "jpg", "jpeg"])
+
+if uploaded_file is not None:
+    col1, col2 = st.columns(2)
     
-    /* Header Banner Quantum AI */
-    .quantum-header {
-        background: linear-gradient(135deg, #0b0f29 0%, #15103a 100%);
-        border: 1px solid rgba(139, 92, 246, 0.3);
-        border-radius: 16px;
-        padding: 25px;
-        text-align: center;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-        margin-bottom: 25px;
-    }
-    
-    .quantum-title {
-        font-size: 28px;
-        font-weight: 900;
-        letter-spacing: 2px;
-        background: linear-gradient(90deg, #38bdf8, #818cf8, #c084fc);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 8px;
-    }
-    
-    .quantum-sub {
-        font-size: 11px;
-        color: #38bdf8;
-        letter-spacing: 1.5px;
-        font-weight: 600;
-    }
+    # MOSTRA GRAFICO ORIGINALE
+    image = Image.open(uploaded_file)
+    with col1:
+        st.subheader("Grafico Originale")
+        st.image(image, use_column_width=True)
 
-    /* Container e Card */
-    .quantum-card {
-        background: rgba(15, 23, 42, 0.75);
-        border: 1px solid rgba(56, 189, 248, 0.2);
-        border-radius: 12px;
-        padding: 16px;
-        margin-bottom: 15px;
-        backdrop-filter: blur(10px);
-    }
-    
-    /* Tabella e Mettiche */
-    [data-testid="stMetricValue"] {
-        color: #38bdf8 !important;
-        font-weight: bold;
-    }
-</style>
-""",
-    unsafe_allow_html=True,
-)
+    analyze_button = st.button("🔍 Analizza e Annotato Grafico", type="primary")
 
-# Client OpenAI con fallback di sicurezza per evitare blocchi
-api_key = st.secrets.get("OPENAI_API_KEY", "")
-client = OpenAI(api_key=api_key) if (api_key and "sk-" in api_key) else None
+    if analyze_button:
+        with st.spinner("L'IA sta analizzando la struttura di mercato e calcolando i livelli..."):
+            # Preparazione immagine per API
+            img_byte_arr = io.BytesIO()
+            image.save(img_byte_arr, format=image.format or 'PNG')
+            base64_image = encode_image(img_byte_arr.getvalue())
 
-
-# ------------------------------------------------------------------
-# ENGINE QUANTITATIVO (ANALISI XM)
-# ------------------------------------------------------------------
-class NabilAIEngine:
-
-    def __init__(self, capital=10000.0):
-        self.capital = capital
-        self.assets_xm = {
-            "GOLD": "GC=F",
-            "OIL": "CL=F",
-            "US100": "^NDX",
-            "GER40": "^GDAXI",
-            "EURUSD": "EURUSD=X",
-            "BTCUSD": "BTC-USD",
-        }
-
-    def calculate_indicators(self, df):
-        df["Upper_20"] = df["High"].shift(1).rolling(20).max()
-        df["Lower_20"] = df["Low"].shift(1).rolling(20).min()
-        high_low = df["High"] - df["Low"]
-        high_close = np.abs(df["High"] - df["Close"].shift(1))
-        low_close = np.abs(df["Low"] - df["Close"].shift(1))
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df["ATR_20"] = tr.rolling(20).mean()
-        return df
-
-    def scan_markets(self):
-        snapshots = {}
-        for name, ticker in self.assets_xm.items():
-            try:
-                data = yf.download(
-                    ticker, period="2mo", interval="1d", progress=False
-                )
-                if data.empty:
-                    continue
-                if isinstance(data.columns, pd.MultiIndex):
-                    data.columns = data.columns.get_level_values(0)
-
-                df = self.calculate_indicators(data)
-                last = df.iloc[-1]
-                close = float(last["Close"])
-                up = float(last["Upper_20"])
-                low = float(last["Lower_20"])
-                atr = float(last["ATR_20"])
-
-                snapshots[name] = {
-                    "price": close,
-                    "upper_20": up,
-                    "lower_20": low,
-                    "atr": atr,
-                    "signal": (
-                        "LONG"
-                        if close > up
-                        else ("SHORT" if close < low else "RANGE")
-                    ),
-                }
-            except Exception:
-                continue
-        return snapshots
-
-
-# ------------------------------------------------------------------
-# SESSION STATE
-# ------------------------------------------------------------------
-if "engine" not in st.session_state:
-    st.session_state.engine = NabilAIEngine()
-
-if "trade_history" not in st.session_state:
-    st.session_state.trade_history = [
-        {
-            "ID": "TRD-1092",
-            "Asset": "GOLD",
-            "Tipo": "LONG",
-            "Apertura": "2026-07-24 14:30",
-            "Chiusura": "2026-07-24 18:15",
-            "Esito": "TP",
-            "P&L": "+$250.00",
-        },
-        {
-            "ID": "TRD-1091",
-            "Asset": "US100",
-            "Tipo": "SHORT",
-            "Apertura": "2026-07-23 09:15",
-            "Chiusura": "2026-07-23 11:40",
-            "Esito": "SL",
-            "P&L": "-$100.00",
-        },
-        {
-            "ID": "TRD-1090",
-            "Asset": "EURUSD",
-            "Tipo": "LONG",
-            "Apertura": "2026-07-22 10:00",
-            "Chiusura": "2026-07-22 16:20",
-            "Esito": "TP",
-            "P&L": "+$180.00",
-        },
-    ]
-
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "assistant",
-            "content": "🤖 **QUANTUM ENGINE XM.COM PRONTO.**\n\nHo allineato i database con i contratti del broker **XM.com**. Chiedimi di 'trovare un'opportunità' o di analizzare i grafici!",
-        }
-    ]
-
-# ------------------------------------------------------------------
-# UI INTERFACE (LAYOUT QUANTUM TERMINAL)
-# ------------------------------------------------------------------
-
-# Banner Superiore
-st.markdown(
-    """
-    <div class="quantum-header">
-        <div class="quantum-title">⚡ QUANTUM AI TERMINAL ⚡</div>
-        <div class="quantum-sub">SYSTEM INTEGRATION: XM.COM BROKER CORE • MULTI-TIMEFRAME QUANT ENGINE</div>
-    </div>
-""",
-    unsafe_allow_html=True,
-)
-
-# Scansione Mercati Live
-with st.spinner("Allineamento dati XM.com in corso..."):
-    snapshots = st.session_state.engine.scan_markets()
-
-# Titolo Sezione Console
-st.markdown("### 📡 CORE CONSOLE")
-
-# Grid Mettiche Prezzi Live
-c1, c2, c3 = st.columns(3)
-c1.metric(
-    "GOLD (XAUUSD)",
-    f"${snapshots.get('GOLD', {}).get('price', 0):,.2f}",
-    snapshots.get("GOLD", {}).get("signal", "N/A"),
-)
-c2.metric(
-    "US100",
-    f"{snapshots.get('US100', {}).get('price', 0):,.2f}",
-    snapshots.get("US100", {}).get("signal", "N/A"),
-)
-c3.metric(
-    "EURUSD",
-    f"{snapshots.get('EURUSD', {}).get('price', 0):.4f}",
-    snapshots.get("EURUSD", {}).get("signal", "N/A"),
-)
-
-st.divider()
-
-# Registro TP / SL
-st.markdown("### 📜 REGISTRO ESEGUITI (TP / SL)")
-df_hist = pd.DataFrame(st.session_state.trade_history)
-
-tot = len(df_hist)
-tp = len(df_hist[df_hist["Esito"] == "TP"])
-sl = len(df_hist[df_hist["Esito"] == "SL"])
-wr = (tp / tot * 100) if tot > 0 else 0
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Totale Trades", tot)
-m2.metric("Take Profit 🎯", tp)
-m3.metric("Stop Loss 🛑", sl)
-m4.metric("Win Rate %", f"{wr:.1f}%")
-
-st.dataframe(df_hist, use_container_width=True)
-
-st.divider()
-
-# Chat AI Console
-st.markdown("### 💬 AI MENTOR CONSOLE")
-
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).write(msg["content"])
-
-if prompt := st.chat_input("Fai una domanda sul grafico o chiedi un'analisi..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    st.chat_message("user").write(prompt)
-
-    if client:
-        try:
-            sys_prompt = f"""
-            Sei l'AI Quantum Trading Mentor integrato con XM.com.
-            Analizza i dati di mercato reali: {json.dumps(snapshots, indent=2)}
-            Storico operazioni: {json.dumps(st.session_state.trade_history, indent=2)}
-            Rispondi in modo tecnico, analitico e senza risposte preimpostate.
-            """
-            res = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": prompt},
+            # Prompt di sistema per forzare l'output in JSON con coordinate visive
+            system_prompt = """
+            Sei un analista tecnico esperto di trading (Smart Money Concepts / Price Action).
+            Analizza l'immagine del grafico fornita ed estrai le informazioni in formato JSON strutturato.
+            
+            Devi restituire un oggetto JSON con questa struttura esatta:
+            {
+                "trade_setup": {
+                    "asset": "String (es. XAUUSD, EURUSD)",
+                    "direction": "BUY" o "SELL",
+                    "entry_price": "float o stringa",
+                    "stop_loss": "float o stringa",
+                    "take_profit": "float o stringa",
+                    "risk_reward": "stringa (es. 1:2.5)"
+                },
+                "analysis_text": "Spiegazione dettagliata dell'analisi (BOS, CHoCH, Zone di Domanda/Offerta, Liquida, Volume Profile).",
+                "boxes": [
+                    {
+                        "label": "Nome Zona (es. Demand Zone M15 / Order Block / FVG)",
+                        "box_2d": [ymin, xmin, ymax, xmax],  # coordinate percentuali da 0 a 100
+                        "color": "green" (per zone buyer/demand) o "red" (per offerta/supply) o "yellow"
+                    }
                 ],
-                temperature=0.3,
-            )
-            reply = res.choices[0].message.content
-        except Exception as e:
-            reply = f"⚠️ Errore di connessione API OpenAI: {str(e)}. Verifica che la chiave sia attiva su platform.openai.com"
-    else:
-        reply = "⚠️ **API Key OpenAI non rilevata o non valida.** Inseriscila nei Secrets di Streamlit su `share.streamlit.io` -> Manage app -> Secrets -> OPENAI_API_KEY = 'sk-...'"
+                "price_lines": [
+                    {
+                        "label": "ENTRY @ ...",
+                        "y_position_percent": float (da 0 a 100 indicante l'altezza della linea),
+                        "color": "blue"
+                    },
+                    {
+                        "label": "STOP LOSS @ ...",
+                        "y_position_percent": float,
+                        "color": "red"
+                    },
+                    {
+                        "label": "TAKE PROFIT @ ...",
+                        "y_position_percent": float,
+                        "color": "green"
+                    }
+                ]
+            }
+            Rispondi ESCLUSIVAMENTE in formato JSON privo di testo extra o blocchi di codice markdown.
+            """
 
-    st.session_state.messages.append({"role": "assistant", "content": reply})
-    st.chat_message("assistant").write(reply)
+            try:
+                # Chiamata all'API Vision
+                response = client.chat.completions.create(
+                    model="gpt-4o",  # Modello multimodale con vision
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Analizza questo grafico e fornisci il JSON per l'annotazione."},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                                }
+                            ]
+                        }
+                    ],
+                    response_format={"type": "json_object"},
+                    max_tokens=1500
+                )
+
+                # Parsing del JSON restituito dall'IA
+                analysis_data = json.loads(response.choices[0].message.content)
+
+                # Generazione Immagine Annotata
+                annotated_img = annotate_chart(image, analysis_data)
+
+                # MOSTRA RISULTATI
+                with col2:
+                    st.subheader("Grafico Annotato dall'IA")
+                    st.image(annotated_img, use_column_width=True)
+
+                st.markdown("---")
+                st.subheader("📊 Scheda Operativa e Analisi Tecnica")
+                
+                # Tabella o Metriche per i livelli
+                setup = analysis_data.get("trade_setup", {})
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Direzione", setup.get("direction", "N/A"))
+                m2.metric("Entry", setup.get("entry_price", "N/A"))
+                m3.metric("Stop Loss", setup.get("stop_loss", "N/A"))
+                m4.metric("Take Profit", setup.get("take_profit", "N/A"))
+                m5.metric("Rischio/Rendimento", setup.get("risk_reward", "N/A"))
+
+                st.write("**Spiegazione del Setup:**")
+                st.info(analysis_data.get("analysis_text", "Nessuna spiegazione fornita."))
+
+            except Exception as e:
+                st.error(f"Errore durante l'elaborazione dell'analisi: {e}")
