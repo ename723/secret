@@ -1,126 +1,167 @@
-import json
-import io
 import streamlit as st
-from PIL import Image, ImageDraw
-from google import genai
-from google.genai import types
 
-# 1. Inizializzazione Client Google AI Studio (Gratuito)
-api_key = st.secrets.get("GEMINI_API_KEY", "")
+# Impostazione pagina mobile-friendly
+st.set_page_config(page_title="AI Chart Detector", layout="centered")
 
-st.set_page_config(page_title="Free Trading Chart Analyzer", layout="wide")
-st.title("📈 AI Chart Analyzer (Versione Gratuita Gemini)")
-st.write("Carica lo screenshot del tuo grafico per ricevere l'analisi visiva, i livelli di trading e le annotazioni sulle zone chiave senza costi.")
+# CSS Personalizzato per replicare l'UI del video
+st.markdown("""
+<style>
+    /* Sfondo scuro principale */
+    .stApp {
+        background-color: #0b0f19;
+        color: #f3f4f6;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
 
-# 2. Funzione per disegnare le annotazioni sul grafico
-def annotate_chart(original_image, annotations):
-    img = original_image.convert("RGBA")
-    draw = ImageDraw.Draw(img)
-    width, height = img.size
+    /* Header SIMBOLO */
+    .symbol-header {
+        text-align: center;
+        font-size: 24px;
+        font-weight: 800;
+        letter-spacing: 1px;
+        margin-bottom: 20px;
+        color: #ffffff;
+    }
 
-    # Disegno delle Bounding Box (Order Blocks, FVG, Liquidity)
-    for box in annotations.get("boxes", []):
-        ymin, xmin, ymax, xmax = box.get("box_2d", [0, 0, 0, 0])
-        left = (xmin / 100.0) * width
-        top = (ymin / 100.0) * height
-        right = (xmax / 100.0) * width
-        bottom = (ymax / 100.0) * height
-        
-        label = box.get("label", "")
-        color = box.get("color", "yellow")
+    /* Card Contenitore generale */
+    .ui-card {
+        background-color: #151c2c;
+        border-radius: 16px;
+        padding: 16px;
+        margin-bottom: 16px;
+        border: 1px solid #232d42;
+    }
 
-        draw.rectangle([left, top, right, bottom], outline=color, width=3)
-        draw.text((left + 5, top + 5), label, fill=color)
+    .card-title {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        color: #94a3b8;
+        font-weight: 600;
+        margin-bottom: 12px;
+    }
 
-    # Disegno dei livelli di prezzo (Entry, SL, TP)
-    for line in annotations.get("price_lines", []):
-        y_percent = line.get("y_position_percent", 50)
-        y_pixel = (y_percent / 100.0) * height
-        label = line.get("label", "")
-        color = line.get("color", "white")
+    /* Badge Grid per Insights */
+    .badge-grid {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+    }
 
-        draw.line([(0, y_pixel), (width, y_pixel)], fill=color, width=2)
-        draw.text((10, y_pixel - 15), label, fill=color)
+    .badge-item {
+        background: #1e293b;
+        padding: 10px;
+        border-radius: 10px;
+        text-align: center;
+        flex: 1;
+    }
 
-    return img.convert("RGB")
+    .badge-label {
+        font-size: 11px;
+        color: #64748b;
+    }
 
-# 3. Caricamento Immagine
-uploaded_file = st.file_uploader("Carica lo screenshot del grafico (PNG, JPG)", type=["png", "jpg", "jpeg"])
+    .badge-value {
+        font-size: 14px;
+        font-weight: 700;
+        color: #38bdf8;
+        margin-top: 2px;
+    }
 
-if uploaded_file is not None:
-    col1, col2 = st.columns(2)
-    image = Image.open(uploaded_file)
-    
-    with col1:
-        st.subheader("Grafico Originale")
-        st.image(image, use_column_width=True)
+    /* Strategy Box (HOLD/BUY/SELL) */
+    .strategy-box {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border-left: 4px solid #f59e0b; /* Arancione per HOLD, Verde #22c55e per BUY */
+        padding: 14px;
+        border-radius: 8px;
+        margin-bottom: 12px;
+    }
 
-    if st.button("🔍 Analizza Gratis con Gemini AI", type="primary"):
-        if not api_key:
-            st.error("Inserisci la GEMINI_API_KEY nei Secrets di Streamlit!")
-        else:
-            with st.spinner("Gemini sta analizzando la struttura del grafico..."):
-                try:
-                    client = genai.Client(api_key=api_key)
+    .strategy-badge {
+        display: inline-block;
+        background-color: #f59e0b;
+        color: #000;
+        font-weight: 800;
+        padding: 4px 12px;
+        border-radius: 6px;
+        font-size: 14px;
+        margin-bottom: 8px;
+    }
 
-                    prompt = """
-                    Sei un analista tecnico esperto di trading (Smart Money Concepts / Price Action).
-                    Analizza questo grafico ed estrai le informazioni in formato JSON strutturato.
-                    
-                    Restituisci questo oggetto JSON:
-                    {
-                        "trade_setup": {
-                            "direction": "BUY" o "SELL",
-                            "entry_price": "valore",
-                            "stop_loss": "valore",
-                            "take_profit": "valore",
-                            "risk_reward": "es. 1:2.5"
-                        },
-                        "analysis_text": "Spiegazione dettagliata dell'analisi (BOS, CHoCH, Zone di Domanda/Offerta, Liquida, Volume Profile).",
-                        "boxes": [
-                            {
-                                "label": "Nome Zona (es. Demand Zone / Order Block)",
-                                "box_2d": [ymin, xmin, ymax, xmax],  # percentuali da 0 a 100
-                                "color": "green" o "red" o "yellow"
-                            }
-                        ],
-                        "price_lines": [
-                            {"label": "ENTRY @ ...", "y_position_percent": 50.0, "color": "blue"},
-                            {"label": "STOP LOSS @ ...", "y_position_percent": 70.0, "color": "red"},
-                            {"label": "TAKE PROFIT @ ...", "y_position_percent": 20.0, "color": "green"}
-                        ]
-                    }
-                    """
+    /* Tag dei Pattern Riconosciuti */
+    .pattern-chip {
+        display: inline-block;
+        background-color: #1e293b;
+        border: 1px solid #334155;
+        color: #cbd5e1;
+        padding: 6px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+        margin-right: 6px;
+        margin-bottom: 6px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-                    # Chiamata API Gratuita al modello visivo di Gemini
-                    response = client.models.generate_content(
-                        model='gemini-1.5-flash',
-                        contents=[image, prompt],
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json"
-                        )
-                    )
+# ----------------- UI COMPONENTI -----------------
 
-                    analysis_data = json.loads(response.text)
-                    annotated_img = annotate_chart(image, analysis_data)
+# 1. Header Asset
+st.markdown('<div class="symbol-header">EURUSD</div>', unsafe_allow_html=True)
 
-                    with col2:
-                        st.subheader("Grafico Annotato dall'IA")
-                        st.image(annotated_img, use_column_width=True)
+# 2. Card Insights (Trend, Timeframe, Volatilità)
+st.markdown("""
+<div class="ui-card">
+    <div class="card-title">Insights</div>
+    <div class="badge-grid">
+        <div class="badge-item">
+            <div class="badge-label">Trend</div>
+            <div class="badge-value">Sideways</div>
+        </div>
+        <div class="badge-item">
+            <div class="badge-label">Timeframe</div>
+            <div class="badge-value">1H</div>
+        </div>
+        <div class="badge-item">
+            <div class="badge-label">Volatilità</div>
+            <div class="badge-value">Media</div>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-                    st.markdown("---")
-                    st.subheader("📊 Scheda Operativa e Analisi Tecnica")
-                    
-                    setup = analysis_data.get("trade_setup", {})
-                    m1, m2, m3, m4, m5 = st.columns(5)
-                    m1.metric("Direzione", setup.get("direction", "N/A"))
-                    m2.metric("Entry", setup.get("entry_price", "N/A"))
-                    m3.metric("Stop Loss", setup.get("stop_loss", "N/A"))
-                    m4.metric("Take Profit", setup.get("take_profit", "N/A"))
-                    m5.metric("Rischio/Rendimento", setup.get("risk_reward", "N/A"))
+# 3. Card AI Strategy
+st.markdown("""
+<div class="ui-card">
+    <div class="card-title">AI Strategy</div>
+    <div class="strategy-box">
+        <div class="strategy-badge">HOLD</div>
+        <p style="font-size: 13px; color: #cbd5e1; margin: 0;">
+            Il prezzo si trova all'interno di un range di consolidamento. Si consiglia attesa fino allo sweep della liquidità sui minimi o la rottura della struttura.
+        </p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-                    st.write("**Spiegazione del Setup:**")
-                    st.info(analysis_data.get("analysis_text", "Nessuna spiegazione fornita."))
+# 4. Pattern Riconosciuti
+st.markdown("""
+<div class="ui-card">
+    <div class="card-title">Erkannte Muster / Pattern</div>
+    <div>
+        <span class="pattern-chip">Double Bottom</span>
+        <span class="pattern-chip">Bullish Engulfing</span>
+        <span class="pattern-chip">FVG Unfilled</span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-                except Exception as e:
-                    st.error(f"Errore durante l'elaborazione: {e}")
+# 5. Dettagli Analisi (Accordions)
+st.markdown('<div class="card-title" style="padding-left: 4px;">Detaillierte Analyse</div>', unsafe_allow_html=True)
+
+with st.expander("Price Action & Struttura"):
+    st.write("Presenza di una struttura interna ribassista con reazione immediata sul POI a 1.0850.")
+
+with st.expander("Supporti e Resistenze"):
+    st.write("• **Resistenza Chiave:** 1.0920\n• **Supporto Chiave:** 1.0810")
+
+with st.expander("Indicatori & Momentum"):
+    st.write("RSI in zona neutrale (48). Nessuna divergenza evidente sul timeframe orario.")
